@@ -1,24 +1,39 @@
 const express = require('express');
 const router = express.Router();
-const { db } = require('../database');
+const { getQuery, nowIso } = require('../database');
 
-const getQuery = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) reject(err);
-      else resolve(rows);
-    });
-  });
-};
+function parseDateParam(d) {
+  if (!d) return null;
+  if (d instanceof Date) return d;
+  if (typeof d === 'string') {
+    const parsed = new Date(d);
+    if (!isNaN(parsed.getTime())) return parsed;
+  }
+  return null;
+}
+
+function dateToIsoStart(dateStr) {
+  const d = parseDateParam(dateStr);
+  if (!d) return null;
+  d.setUTCHours(0, 0, 0, 0);
+  return d.toISOString();
+}
+
+function dateToIsoEnd(dateStr) {
+  const d = parseDateParam(dateStr);
+  if (!d) return null;
+  d.setUTCHours(23, 59, 59, 999);
+  return d.toISOString();
+}
 
 router.get('/drums', async (req, res) => {
   try {
-    const { 
-      drum_number, shift_id, current_status, 
+    const {
+      drum_number, shift_id, current_status,
       min_wear, max_wear, wear_severity,
       start_date, end_date, date_type = 'updated_at'
     } = req.query;
-    
+
     let sql = `
       SELECT DISTINCT d.*, 
              s.batch_number as skin_batch,
@@ -35,31 +50,34 @@ router.get('/drums', async (req, res) => {
       LEFT JOIN rack_positions p ON d.position_id = p.id
       LEFT JOIN shifts sh ON d.shift_id = sh.id
     `;
-    
+
     let joinUsage = false;
     if (date_type === 'usage') {
       joinUsage = true;
       sql += ` LEFT JOIN usage_records u ON d.id = u.drum_id `;
     }
-    
+
     sql += ` WHERE 1=1 `;
     let params = [];
-    
+
     if (drum_number) {
       sql += ` AND d.drum_number LIKE ?`;
       params.push(`%${drum_number}%`);
     }
-    
+
     if (shift_id) {
-      sql += ` AND d.shift_id = ?`;
-      params.push(shift_id);
+      const sid = parseInt(shift_id, 10);
+      if (Number.isInteger(sid)) {
+        sql += ` AND d.shift_id = ?`;
+        params.push(sid);
+      }
     }
-    
+
     if (current_status) {
       sql += ` AND d.current_status = ?`;
       params.push(current_status);
     }
-    
+
     if (wear_severity) {
       if (wear_severity === 'mild' || wear_severity === '轻微') {
         sql += ` AND d.wear_level BETWEEN 0 AND 3`;
@@ -69,41 +87,53 @@ router.get('/drums', async (req, res) => {
         sql += ` AND d.wear_level >= 7`;
       }
     }
-    
-    if (min_wear) {
-      sql += ` AND d.wear_level >= ?`;
-      params.push(min_wear);
+
+    if (min_wear !== undefined && min_wear !== null && min_wear !== '') {
+      const mw = Number(min_wear);
+      if (Number.isFinite(mw)) {
+        sql += ` AND d.wear_level >= ?`;
+        params.push(mw);
+      }
     }
-    
-    if (max_wear) {
-      sql += ` AND d.wear_level <= ?`;
-      params.push(max_wear);
+
+    if (max_wear !== undefined && max_wear !== null && max_wear !== '') {
+      const mw = Number(max_wear);
+      if (Number.isFinite(mw)) {
+        sql += ` AND d.wear_level <= ?`;
+        params.push(mw);
+      }
     }
-    
+
     if (start_date) {
-      if (date_type === 'usage' && joinUsage) {
-        sql += ` AND u.checkout_time >= ?`;
-      } else if (date_type === 'created_at') {
-        sql += ` AND d.created_at >= ?`;
-      } else {
-        sql += ` AND d.updated_at >= ?`;
+      const isoStart = dateToIsoStart(start_date);
+      if (isoStart) {
+        if (date_type === 'usage' && joinUsage) {
+          sql += ` AND u.checkout_time >= ?`;
+        } else if (date_type === 'created_at') {
+          sql += ` AND d.created_at >= ?`;
+        } else {
+          sql += ` AND d.updated_at >= ?`;
+        }
+        params.push(isoStart);
       }
-      params.push(start_date);
     }
-    
+
     if (end_date) {
-      if (date_type === 'usage' && joinUsage) {
-        sql += ` AND u.checkout_time <= ?`;
-      } else if (date_type === 'created_at') {
-        sql += ` AND d.created_at <= ?`;
-      } else {
-        sql += ` AND d.updated_at <= ?`;
+      const isoEnd = dateToIsoEnd(end_date);
+      if (isoEnd) {
+        if (date_type === 'usage' && joinUsage) {
+          sql += ` AND u.checkout_time <= ?`;
+        } else if (date_type === 'created_at') {
+          sql += ` AND d.created_at <= ?`;
+        } else {
+          sql += ` AND d.updated_at <= ?`;
+        }
+        params.push(isoEnd);
       }
-      params.push(end_date);
     }
-    
+
     sql += ` ORDER BY d.updated_at DESC, d.id DESC`;
-    
+
     const drums = await getQuery(sql, params);
     res.json({
       count: drums.length,
@@ -123,7 +153,7 @@ router.get('/drums', async (req, res) => {
 router.get('/usage-records', async (req, res) => {
   try {
     const { drum_id, shift_id, staff_name, start_date, end_date, is_overdue } = req.query;
-    
+
     let sql = `
       SELECT u.*, d.drum_number, d.name as drum_name, sh.name as shift_name
       FROM usage_records u
@@ -132,40 +162,62 @@ router.get('/usage-records', async (req, res) => {
       WHERE 1=1
     `;
     let params = [];
-    
+
     if (drum_id) {
-      sql += ` AND u.drum_id = ?`;
-      params.push(drum_id);
+      const did = parseInt(drum_id, 10);
+      if (Number.isInteger(did)) {
+        sql += ` AND u.drum_id = ?`;
+        params.push(did);
+      }
     }
-    
+
     if (shift_id) {
-      sql += ` AND u.shift_id = ?`;
-      params.push(shift_id);
+      const sid = parseInt(shift_id, 10);
+      if (Number.isInteger(sid)) {
+        sql += ` AND u.shift_id = ?`;
+        params.push(sid);
+      }
     }
-    
+
     if (staff_name) {
       sql += ` AND u.staff_name LIKE ?`;
       params.push(`%${staff_name}%`);
     }
-    
+
     if (start_date) {
-      sql += ` AND u.checkout_time >= ?`;
-      params.push(start_date);
+      const isoStart = dateToIsoStart(start_date);
+      if (isoStart) {
+        sql += ` AND u.checkout_time >= ?`;
+        params.push(isoStart);
+      }
     }
-    
+
     if (end_date) {
-      sql += ` AND u.checkout_time <= ?`;
-      params.push(end_date);
+      const isoEnd = dateToIsoEnd(end_date);
+      if (isoEnd) {
+        sql += ` AND u.checkout_time <= ?`;
+        params.push(isoEnd);
+      }
     }
-    
-    if (is_overdue !== undefined) {
-      sql += ` AND u.is_overdue = ?`;
-      params.push(is_overdue === 'true' ? 1 : 0);
-    }
-    
+
     sql += ` ORDER BY u.checkout_time DESC LIMIT 200`;
-    
-    const records = await getQuery(sql, params);
+
+    let records = await getQuery(sql, params);
+
+    if (is_overdue !== undefined && is_overdue !== '') {
+      const wantOverdue = is_overdue === 'true' || is_overdue === '1' || is_overdue === 1;
+      const now = new Date();
+      records = records.filter(r => {
+        if (r.return_time) {
+          return wantOverdue ? r.is_overdue === 1 : r.is_overdue !== 1;
+        }
+        if (!r.expected_return_time) return !wantOverdue;
+        const expected = new Date(r.expected_return_time);
+        const overdue = !isNaN(expected.getTime()) && now > expected;
+        return wantOverdue ? overdue : !overdue;
+      });
+    }
+
     res.json(records);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -175,7 +227,7 @@ router.get('/usage-records', async (req, res) => {
 router.get('/inspection-records', async (req, res) => {
   try {
     const { drum_id, shift_id, staff_name, start_date, end_date, needs_repair } = req.query;
-    
+
     let sql = `
       SELECT i.*, d.drum_number, d.name as drum_name, sh.name as shift_name
       FROM inspection_records i
@@ -184,39 +236,51 @@ router.get('/inspection-records', async (req, res) => {
       WHERE 1=1
     `;
     let params = [];
-    
+
     if (drum_id) {
-      sql += ` AND i.drum_id = ?`;
-      params.push(drum_id);
+      const did = parseInt(drum_id, 10);
+      if (Number.isInteger(did)) {
+        sql += ` AND i.drum_id = ?`;
+        params.push(did);
+      }
     }
-    
+
     if (shift_id) {
-      sql += ` AND i.shift_id = ?`;
-      params.push(shift_id);
+      const sid = parseInt(shift_id, 10);
+      if (Number.isInteger(sid)) {
+        sql += ` AND i.shift_id = ?`;
+        params.push(sid);
+      }
     }
-    
+
     if (staff_name) {
       sql += ` AND i.staff_name LIKE ?`;
       params.push(`%${staff_name}%`);
     }
-    
+
     if (start_date) {
-      sql += ` AND i.created_at >= ?`;
-      params.push(start_date);
+      const isoStart = dateToIsoStart(start_date);
+      if (isoStart) {
+        sql += ` AND i.created_at >= ?`;
+        params.push(isoStart);
+      }
     }
-    
+
     if (end_date) {
-      sql += ` AND i.created_at <= ?`;
-      params.push(end_date);
+      const isoEnd = dateToIsoEnd(end_date);
+      if (isoEnd) {
+        sql += ` AND i.created_at <= ?`;
+        params.push(isoEnd);
+      }
     }
-    
-    if (needs_repair !== undefined) {
+
+    if (needs_repair !== undefined && needs_repair !== '') {
       sql += ` AND i.needs_repair = ?`;
-      params.push(needs_repair === 'true' ? 1 : 0);
+      params.push(needs_repair === 'true' || needs_repair === '1' ? 1 : 0);
     }
-    
+
     sql += ` ORDER BY i.created_at DESC LIMIT 200`;
-    
+
     const records = await getQuery(sql, params);
     res.json(records);
   } catch (err) {
@@ -227,7 +291,10 @@ router.get('/inspection-records', async (req, res) => {
 router.get('/stats/high-wear-drums', async (req, res) => {
   try {
     const { limit = 20, min_uses = 5 } = req.query;
-    
+
+    const lim = parseInt(limit, 10) || 20;
+    const minUses = parseInt(min_uses, 10) || 5;
+
     const drums = await getQuery(`
       SELECT 
         d.id,
@@ -245,8 +312,8 @@ router.get('/stats/high-wear-drums', async (req, res) => {
       WHERE d.total_uses >= ?
       ORDER BY wear_per_use DESC, d.wear_level DESC
       LIMIT ?
-    `, [min_uses, limit]);
-    
+    `, [minUses, lim]);
+
     res.json({
       title: '高损耗鼓具排行',
       description: '按每次使用磨耗率排序',
@@ -283,7 +350,7 @@ router.get('/stats/pending-reinspection', async (req, res) => {
         AND m.reinspected = 0
       ORDER BY m.created_at DESC
     `);
-    
+
     res.json({
       title: '待复检清单',
       description: '补皮或维修后需要复检的鼓具',
@@ -298,8 +365,9 @@ router.get('/stats/pending-reinspection', async (req, res) => {
 router.get('/stats/shift-anomalies', async (req, res) => {
   try {
     const { days = 30 } = req.query;
-    const dateLimit = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-    
+    const dayCount = parseInt(days, 10) || 30;
+    const dateLimit = new Date(Date.now() - dayCount * 24 * 60 * 60 * 1000).toISOString();
+
     const shiftStats = await getQuery(`
       SELECT 
         sh.id,
@@ -321,7 +389,7 @@ router.get('/stats/shift-anomalies', async (req, res) => {
       GROUP BY sh.id, sh.name
       ORDER BY repair_count DESC, avg_wear_increase DESC, overdue_count DESC
     `, [dateLimit, dateLimit, dateLimit]);
-    
+
     const overallStats = await getQuery(`
       SELECT 
         COUNT(*) as total_records,
@@ -331,33 +399,35 @@ router.get('/stats/shift-anomalies', async (req, res) => {
       FROM usage_records
       WHERE created_at >= ?
     `, [dateLimit]);
-    
+
     const avgWearIncrease = overallStats[0].overall_avg_wear_increase || 0;
-    
+    const now = new Date();
+    const nowIsoStr = now.toISOString();
+
     const anomalies = shiftStats.map(shift => {
       const avgUsePerShift = overallStats[0].total_records / (shiftStats.length || 1);
-      const avgOverdueRate = overallStats[0].total_records > 0 
-        ? overallStats[0].total_overdue / overallStats[0].total_records 
+      const avgOverdueRate = overallStats[0].total_records > 0
+        ? overallStats[0].total_overdue / overallStats[0].total_records
         : 0;
-      
+
       const shiftOverdueRate = shift.total_uses > 0 ? shift.overdue_count / shift.total_uses : 0;
       const shiftAvgWearIncrease = shift.avg_wear_increase || 0;
       const highWearRate = shift.total_uses > 0 ? shift.high_wear_count / shift.total_uses : 0;
       const edgeWearRate = shift.total_uses > 0 ? shift.edge_wear_count / shift.total_uses : 0;
-      
+
       const isHighWear = shiftAvgWearIncrease > avgWearIncrease * 1.2 && shift.total_uses >= 1;
       const isHighEdgeWear = edgeWearRate > 0.2 && shift.edge_wear_count >= 1;
-      
+
       const wearAnomalyScore = (shiftAvgWearIncrease / Math.max(avgWearIncrease, 0.1)) * 30 +
                                (highWearRate * 30) +
                                (isHighEdgeWear ? 20 : 0);
-      
+
       const anomalyScore = Math.round(
-        (shiftOverdueRate * 25) + 
+        (shiftOverdueRate * 25) +
         (shift.repair_count / Math.max(shift.total_uses, 1)) * 25 +
         wearAnomalyScore
       );
-      
+
       let anomalyLevel = 'normal';
       let wearIssue = null;
       if (isHighWear && isHighEdgeWear) {
@@ -370,7 +440,7 @@ router.get('/stats/shift-anomalies', async (req, res) => {
         wearIssue = '边缘磨损突出班次';
         anomalyLevel = 'warning';
       }
-      
+
       return {
         ...shift,
         overdue_rate: Math.round(shiftOverdueRate * 100) / 100,
@@ -387,8 +457,8 @@ router.get('/stats/shift-anomalies', async (req, res) => {
         anomaly_score: anomalyScore,
         wear_analysis: {
           avg_wear_increase: Math.round(shiftAvgWearIncrease * 100) / 100,
-          compared_to_overall: avgWearIncrease > 0 
-            ? Math.round((shiftAvgWearIncrease / avgWearIncrease) * 100) + '%' 
+          compared_to_overall: avgWearIncrease > 0
+            ? Math.round((shiftAvgWearIncrease / avgWearIncrease) * 100) + '%'
             : 'N/A',
           high_wear_count: shift.high_wear_count,
           edge_wear_count: shift.edge_wear_count,
@@ -396,15 +466,15 @@ router.get('/stats/shift-anomalies', async (req, res) => {
         }
       };
     });
-    
+
     anomalies.sort((a, b) => b.anomaly_score - a.anomaly_score);
-    
+
     res.json({
       title: '班次异常分布',
       description: `最近${days}天各班次的异常情况统计（含磨损分析）`,
       time_range: {
         start: dateLimit,
-        end: new Date().toISOString()
+        end: nowIsoStr
       },
       overall: {
         total_uses: overallStats[0].total_records,
@@ -432,8 +502,10 @@ router.get('/stats/shift-anomalies', async (req, res) => {
 router.get('/stats/frequent-wear', async (req, res) => {
   try {
     const { days = 14, threshold = 3 } = req.query;
-    const dateLimit = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-    
+    const dayCount = parseInt(days, 10) || 14;
+    const thresh = parseInt(threshold, 10) || 3;
+    const dateLimit = new Date(Date.now() - dayCount * 24 * 60 * 60 * 1000).toISOString();
+
     const frequentWear = await getQuery(`
       SELECT 
         d.id as drum_id,
@@ -450,8 +522,8 @@ router.get('/stats/frequent-wear', async (req, res) => {
       GROUP BY d.id, d.drum_number, d.name, d.wear_level
       HAVING maintenance_count >= ?
       ORDER BY maintenance_count DESC
-    `, [dateLimit, threshold]);
-    
+    `, [dateLimit, thresh]);
+
     res.json({
       title: '高频磨耗预警',
       description: `在${days}天内维修/补皮超过${threshold}次的鼓具`,
@@ -466,28 +538,42 @@ router.get('/stats/frequent-wear', async (req, res) => {
 router.get('/stats/overdue-returns', async (req, res) => {
   try {
     const { days = 7 } = req.query;
-    const dateLimit = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-    
+    const dayCount = parseInt(days, 10) || 7;
+    const dateLimit = new Date(Date.now() - dayCount * 24 * 60 * 60 * 1000).toISOString();
+
     const overdueRecords = await getQuery(`
       SELECT 
         u.*,
         d.drum_number,
         d.name as drum_name,
-        sh.name as shift_name,
-        ROUND((JULIANDAY(u.return_time) - JULIANDAY(u.expected_return_time)) * 24, 1) as overdue_hours
+        sh.name as shift_name
       FROM usage_records u
       JOIN drums d ON u.drum_id = d.id
       LEFT JOIN shifts sh ON u.shift_id = sh.id
       WHERE u.is_overdue = 1 AND u.return_time >= ?
-      ORDER BY overdue_hours DESC
+      ORDER BY u.return_time DESC
     `, [dateLimit]);
-    
+
+    const enriched = overdueRecords.map(r => {
+      let overdue_hours = 0;
+      if (r.return_time && r.expected_return_time) {
+        const ret = new Date(r.return_time);
+        const exp = new Date(r.expected_return_time);
+        if (!isNaN(ret.getTime()) && !isNaN(exp.getTime())) {
+          overdue_hours = Math.round((ret - exp) / (1000 * 60 * 60) * 10) / 10;
+        }
+      }
+      return { ...r, overdue_hours };
+    });
+
+    const totalHours = Math.round(enriched.reduce((sum, r) => sum + (r.overdue_hours || 0), 0) * 10) / 10;
+
     res.json({
       title: '归位超时记录',
       description: `最近${days}天的超时归还记录`,
-      count: overdueRecords.length,
-      total_overdue_hours: Math.round(overdueRecords.reduce((sum, r) => sum + (r.overdue_hours || 0), 0) * 10) / 10,
-      data: overdueRecords
+      count: enriched.length,
+      total_overdue_hours: totalHours,
+      data: enriched
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -523,7 +609,7 @@ router.get('/stats/unrepaired-after-patch', async (req, res) => {
         ) = 0
       ORDER BY m.created_at ASC
     `);
-    
+
     res.json({
       title: '补皮后未复检清单',
       description: '更换鼓皮后需要但尚未进行复检的鼓具',
@@ -543,7 +629,7 @@ router.get('/status', async (req, res) => {
       GROUP BY current_status
       ORDER BY count DESC
     `);
-    
+
     const totalDrums = await getQuery('SELECT COUNT(*) as total FROM drums');
     const activeUsage = await getQuery('SELECT COUNT(*) as active FROM usage_records WHERE return_time IS NULL');
     const pendingMaintenance = await getQuery(`
@@ -551,7 +637,7 @@ router.get('/status', async (req, res) => {
       FROM maintenance_records 
       WHERE end_time IS NULL
     `);
-    
+
     res.json({
       total_drums: totalDrums[0].total,
       active_in_use: activeUsage[0].active,
@@ -567,21 +653,6 @@ router.get('/borrowed-drums', async (req, res) => {
   try {
     const { shift_id, staff_name, is_overdue, start_date, end_date, extension_status } = req.query;
 
-    let havingClause = '';
-    let havingParams = [];
-
-    if (extension_status) {
-      if (extension_status === 'none') {
-        havingClause = ` HAVING latest_extension_status IS NULL `;
-      } else if (extension_status === 'pending') {
-        havingClause = ` HAVING latest_extension_status = 'pending' `;
-      } else if (extension_status === 'approved') {
-        havingClause = ` HAVING latest_extension_status = 'approved' `;
-      } else if (extension_status === 'rejected') {
-        havingClause = ` HAVING latest_extension_status = 'rejected' `;
-      }
-    }
-
     let sql = `
       SELECT 
         u.id as usage_id,
@@ -595,17 +666,6 @@ router.get('/borrowed-drums', async (req, res) => {
         u.expected_return_time,
         sh.id as shift_id,
         sh.name as shift_name,
-        CASE 
-          WHEN u.expected_return_time IS NOT NULL AND DATETIME('now') > u.expected_return_time THEN 1 
-          ELSE 0 
-        END as is_overdue,
-        ROUND(
-          CASE 
-            WHEN u.expected_return_time IS NOT NULL AND DATETIME('now') > u.expected_return_time 
-            THEN (JULIANDAY('now') - JULIANDAY(u.expected_return_time)) * 24 
-            ELSE 0 
-          END, 2
-        ) as overdue_hours,
         (
           SELECT e.id 
           FROM extension_requests e 
@@ -621,10 +681,12 @@ router.get('/borrowed-drums', async (req, res) => {
           LIMIT 1
         ) as pending_extension_hours,
         (
-          SELECT MAX(e.new_expected_return_time) 
+          SELECT e.new_expected_return_time 
           FROM extension_requests e 
           WHERE e.usage_record_id = u.id 
             AND e.approval_status = 'approved'
+          ORDER BY e.created_at DESC
+          LIMIT 1
         ) as latest_approved_extension_time,
         (
           SELECT e.original_expected_return_time 
@@ -700,8 +762,11 @@ router.get('/borrowed-drums', async (req, res) => {
     let params = [];
 
     if (shift_id) {
-      sql += ` AND u.shift_id = ?`;
-      params.push(shift_id);
+      const sid = parseInt(shift_id, 10);
+      if (Number.isInteger(sid)) {
+        sql += ` AND u.shift_id = ?`;
+        params.push(sid);
+      }
     }
 
     if (staff_name) {
@@ -709,45 +774,42 @@ router.get('/borrowed-drums', async (req, res) => {
       params.push(`%${staff_name}%`);
     }
 
-    if (is_overdue !== undefined) {
-      if (is_overdue === 'true' || is_overdue === '1') {
-        sql += ` AND u.expected_return_time IS NOT NULL AND DATETIME('now') > u.expected_return_time`;
-      } else {
-        sql += ` AND (u.expected_return_time IS NULL OR DATETIME('now') <= u.expected_return_time)`;
+    if (start_date) {
+      const isoStart = dateToIsoStart(start_date);
+      if (isoStart) {
+        sql += ` AND u.checkout_time >= ?`;
+        params.push(isoStart);
       }
     }
 
-    if (start_date) {
-      sql += ` AND u.checkout_time >= ?`;
-      params.push(start_date);
-    }
-
     if (end_date) {
-      sql += ` AND u.checkout_time <= ?`;
-      params.push(end_date);
+      const isoEnd = dateToIsoEnd(end_date);
+      if (isoEnd) {
+        sql += ` AND u.checkout_time <= ?`;
+        params.push(isoEnd);
+      }
     }
 
-    sql += ` GROUP BY u.id `;
+    sql += ` GROUP BY u.id ORDER BY u.checkout_time DESC`;
 
-    if (havingClause) {
-      sql += havingClause;
-      params = params.concat(havingParams);
-    }
-
-    sql += ` ORDER BY u.checkout_time DESC`;
-
-    const records = await getQuery(sql, params);
+    let records = await getQuery(sql, params);
+    const now = new Date();
 
     const enrichedRecords = records.map(record => {
       const currentExpectedReturn = record.latest_approved_extension_time || record.expected_return_time;
       const originalExpectedReturn = record.first_original_expected_return_time || record.expected_return_time;
 
-      const now = new Date();
-      const currentExpected = new Date(currentExpectedReturn);
-      const actualIsOverdue = now > currentExpected;
-      const actualOverdueHours = actualIsOverdue
-        ? Math.round((now - currentExpected) / (1000 * 60 * 60) * 100) / 100
-        : 0;
+      let actualIsOverdue = false;
+      let actualOverdueHours = 0;
+      if (currentExpectedReturn) {
+        const currentExpected = new Date(currentExpectedReturn);
+        if (!isNaN(currentExpected.getTime())) {
+          actualIsOverdue = now > currentExpected;
+          actualOverdueHours = actualIsOverdue
+            ? Math.round((now - currentExpected) / (1000 * 60 * 60) * 100) / 100
+            : 0;
+        }
+      }
 
       return {
         ...record,
@@ -759,13 +821,28 @@ router.get('/borrowed-drums', async (req, res) => {
       };
     });
 
+    if (is_overdue !== undefined && is_overdue !== '') {
+      const wantOverdue = is_overdue === 'true' || is_overdue === '1' || is_overdue === 1;
+      const filtered = enrichedRecords.filter(r => (r.is_overdue === 1) === wantOverdue);
+      records = filtered;
+    } else {
+      records = enrichedRecords;
+    }
+
+    if (extension_status) {
+      records = records.filter(r => {
+        if (extension_status === 'none') return r.latest_extension_status === null;
+        return r.latest_extension_status === extension_status;
+      });
+    }
+
     res.json({
       title: '在借鼓具清单',
       description: '当前未归还的鼓具列表，含延期信息和超时状态',
-      count: enrichedRecords.length,
-      overdue_count: enrichedRecords.filter(r => r.is_overdue === 1).length,
-      pending_extension_count: enrichedRecords.filter(r => r.pending_extension_id !== null).length,
-      extension_count: enrichedRecords.filter(r => r.has_extension_history).length,
+      count: records.length,
+      overdue_count: records.filter(r => r.is_overdue === 1).length,
+      pending_extension_count: records.filter(r => r.pending_extension_id !== null).length,
+      extension_count: records.filter(r => r.has_extension_history).length,
       filters: {
         shift_id: shift_id || null,
         staff_name: staff_name || null,
@@ -778,7 +855,7 @@ router.get('/borrowed-drums', async (req, res) => {
         'approved': '已同意',
         'rejected': '已拒绝'
       },
-      data: enrichedRecords
+      data: records
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -812,28 +889,15 @@ router.get('/extension-records', async (req, res) => {
         sh.name as shift_name,
         u.checkout_time,
         u.return_time,
-        CASE 
-          WHEN u.return_time IS NOT NULL THEN '已归还'
-          WHEN e.approval_status = 'approved' AND e.new_expected_return_time IS NOT NULL 
-            AND DATETIME('now') > e.new_expected_return_time THEN 1
-          WHEN e.approval_status != 'approved' AND u.expected_return_time IS NOT NULL 
-            AND DATETIME('now') > u.expected_return_time THEN 1
-          ELSE 0 
-        END as is_overdue,
-        CASE 
-          WHEN u.return_time IS NOT NULL THEN 0
-          WHEN e.approval_status = 'approved' AND e.new_expected_return_time IS NOT NULL 
-            THEN ROUND(MAX(0, (JULIANDAY('now') - JULIANDAY(e.new_expected_return_time)) * 24), 2)
-          WHEN e.approval_status != 'approved' AND u.expected_return_time IS NOT NULL 
-            THEN ROUND(MAX(0, (JULIANDAY('now') - JULIANDAY(u.expected_return_time)) * 24), 2)
-          ELSE 0 
-        END as overdue_hours,
-        CASE e.approval_status
-          WHEN 'pending' THEN '待审批'
-          WHEN 'approved' THEN '已同意'
-          WHEN 'rejected' THEN '已拒绝'
-          ELSE e.approval_status
-        END as approval_status_label
+        u.expected_return_time as usage_expected_return_time,
+        (
+          SELECT e2.new_expected_return_time 
+          FROM extension_requests e2 
+          WHERE e2.usage_record_id = u.id 
+            AND e2.approval_status = 'approved'
+          ORDER BY e2.created_at DESC
+          LIMIT 1
+        ) as latest_approved_time
       FROM extension_requests e
       JOIN drums d ON e.drum_id = d.id
       JOIN usage_records u ON e.usage_record_id = u.id
@@ -843,8 +907,11 @@ router.get('/extension-records', async (req, res) => {
     let params = [];
 
     if (shift_id) {
-      sql += ` AND u.shift_id = ?`;
-      params.push(shift_id);
+      const sid = parseInt(shift_id, 10);
+      if (Number.isInteger(sid)) {
+        sql += ` AND u.shift_id = ?`;
+        params.push(sid);
+      }
     }
 
     if (staff_name) {
@@ -858,68 +925,88 @@ router.get('/extension-records', async (req, res) => {
     }
 
     if (drum_id) {
-      sql += ` AND e.drum_id = ?`;
-      params.push(drum_id);
+      const did = parseInt(drum_id, 10);
+      if (Number.isInteger(did)) {
+        sql += ` AND e.drum_id = ?`;
+        params.push(did);
+      }
     }
 
     if (start_date) {
-      sql += ` AND e.created_at >= ?`;
-      params.push(start_date);
+      const isoStart = dateToIsoStart(start_date);
+      if (isoStart) {
+        sql += ` AND e.created_at >= ?`;
+        params.push(isoStart);
+      }
     }
 
     if (end_date) {
-      sql += ` AND e.created_at <= ?`;
-      params.push(end_date);
+      const isoEnd = dateToIsoEnd(end_date);
+      if (isoEnd) {
+        sql += ` AND e.created_at <= ?`;
+        params.push(isoEnd);
+      }
     }
 
     sql += ` ORDER BY e.created_at DESC LIMIT 200`;
 
-    const records = await getQuery(sql, params);
+    const rawRecords = await getQuery(sql, params);
+    const now = new Date();
 
-    const enrichedRecords = records.map(record => {
-      const now = new Date();
-      let currentExpectedReturn;
+    let records = rawRecords.map(record => {
+      const currentExpectedReturn = record.latest_approved_time || record.usage_expected_return_time;
 
-      if (record.approval_status === 'approved' && record.new_expected_return_time) {
-        currentExpectedReturn = new Date(record.new_expected_return_time);
-      } else {
-        currentExpectedReturn = new Date(record.original_expected_return_time);
+      let actualIsOverdue = false;
+      let actualOverdueHours = 0;
+      if (!record.return_time && currentExpectedReturn) {
+        const expected = new Date(currentExpectedReturn);
+        if (!isNaN(expected.getTime())) {
+          actualIsOverdue = now > expected;
+          actualOverdueHours = actualIsOverdue
+            ? Math.round((now - expected) / (1000 * 60 * 60) * 100) / 100
+            : 0;
+        }
       }
-
-      const actualIsOverdue = record.return_time ? false : now > currentExpectedReturn;
-      const actualOverdueHours = actualIsOverdue && !record.return_time
-        ? Math.round((now - currentExpectedReturn) / (1000 * 60 * 60) * 100) / 100
-        : 0;
 
       let isOverdueMatch = true;
-      if (is_overdue !== undefined) {
-        const wantOverdue = is_overdue === 'true' || is_overdue === '1';
+      if (is_overdue !== undefined && is_overdue !== '') {
+        const wantOverdue = is_overdue === 'true' || is_overdue === '1' || is_overdue === 1;
         isOverdueMatch = actualIsOverdue === wantOverdue;
       }
+
+      const displayExpected = record.approval_status === 'approved' && record.new_expected_return_time
+        ? record.new_expected_return_time
+        : record.original_expected_return_time;
 
       return {
         ...record,
         is_overdue: actualIsOverdue ? 1 : 0,
         overdue_hours: actualOverdueHours,
-        current_expected_return_time: record.approval_status === 'approved' && record.new_expected_return_time
-          ? record.new_expected_return_time
-          : record.original_expected_return_time,
+        current_expected_return_time: currentExpectedReturn,
+        display_expected_return_time: displayExpected,
+        approval_status_label: (() => {
+          switch (record.approval_status) {
+            case 'pending': return '待审批';
+            case 'approved': return '已同意';
+            case 'rejected': return '已拒绝';
+            default: return record.approval_status;
+          }
+        })(),
         _matches_overdue_filter: isOverdueMatch
       };
-    }).filter(record => record._matches_overdue_filter)
-      .map(record => {
-        const { _matches_overdue_filter, ...rest } = record;
-        return rest;
-      });
+    }).filter(r => r._matches_overdue_filter).map(r => {
+      const { _matches_overdue_filter, latest_approved_time, usage_expected_return_time, display_expected_return_time, ...rest } = r;
+      return rest;
+    });
 
     res.json({
       title: '延期申请记录',
       description: '所有借用延期申请记录，支持多维度筛选',
-      count: enrichedRecords.length,
-      approved_count: enrichedRecords.filter(r => r.approval_status === 'approved').length,
-      rejected_count: enrichedRecords.filter(r => r.approval_status === 'rejected').length,
-      pending_count: enrichedRecords.filter(r => r.approval_status === 'pending').length,
-      overdue_count: enrichedRecords.filter(r => r.is_overdue === 1).length,
+      count: records.length,
+      approved_count: records.filter(r => r.approval_status === 'approved').length,
+      rejected_count: records.filter(r => r.approval_status === 'rejected').length,
+      pending_count: records.filter(r => r.approval_status === 'pending').length,
+      overdue_count: records.filter(r => r.is_overdue === 1).length,
       filters: {
         shift_id: shift_id || null,
         staff_name: staff_name || null,
@@ -932,7 +1019,7 @@ router.get('/extension-records', async (req, res) => {
         'approved': '已同意',
         'rejected': '已拒绝'
       },
-      data: enrichedRecords
+      data: records
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

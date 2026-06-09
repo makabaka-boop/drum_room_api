@@ -4,6 +4,51 @@ const path = require('path');
 const dbPath = path.join(__dirname, 'drum_room.db');
 const db = new sqlite3.Database(dbPath);
 
+const nowIso = () => new Date().toISOString();
+
+const runQuery = (sql, params = []) => {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function(err) {
+      if (err) reject(err);
+      else resolve({ id: this.lastID, changes: this.changes });
+    });
+  });
+};
+
+const getQuery = (sql, params = []) => {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows);
+    });
+  });
+};
+
+const getOne = (sql, params = []) => {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+};
+
+const withTransaction = async (fn) => {
+  await runQuery('BEGIN IMMEDIATE TRANSACTION');
+  try {
+    const result = await fn();
+    await runQuery('COMMIT');
+    return result;
+  } catch (err) {
+    try {
+      await runQuery('ROLLBACK');
+    } catch (rollbackErr) {
+      console.error('Rollback failed:', rollbackErr);
+    }
+    throw err;
+  }
+};
+
 const initDatabase = () => {
   return new Promise((resolve, reject) => {
     db.serialize(() => {
@@ -164,4 +209,30 @@ const initDatabase = () => {
   });
 };
 
-module.exports = { db, initDatabase };
+const VALID_DRUM_STATUSES = ['待领出', '已领出', '待巡检', '维护中', '停用申请中', '停用中', '恢复可用'];
+
+const isValidStatus = (s) => VALID_DRUM_STATUSES.includes(s);
+
+const isPosInt = (v) => Number.isInteger(v) && v > 0;
+const isNonNegInt = (v) => Number.isInteger(v) && v >= 0;
+const isValidWearLevel = (v) => Number.isInteger(v) && v >= 0 && v <= 10;
+const isNonEmptyStr = (v) => typeof v === 'string' && v.trim().length > 0;
+
+const toBool = (v) => v === true || v === 1 || v === 'true' || v === '1';
+
+module.exports = {
+  db,
+  initDatabase,
+  runQuery,
+  getQuery,
+  getOne,
+  withTransaction,
+  nowIso,
+  VALID_DRUM_STATUSES,
+  isValidStatus,
+  isPosInt,
+  isNonNegInt,
+  isValidWearLevel,
+  isNonEmptyStr,
+  toBool
+};
