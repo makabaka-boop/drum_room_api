@@ -1,15 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const { db } = require('../database');
-
-const getQuery = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) reject(err);
-      else resolve(rows);
-    });
-  });
-};
+const { 
+  getQuery, 
+  getOne,
+  getCurrentTimeISO
+} = require('../database');
 
 router.get('/drums', async (req, res) => {
   try {
@@ -70,14 +65,14 @@ router.get('/drums', async (req, res) => {
       }
     }
     
-    if (min_wear) {
+    if (min_wear !== undefined) {
       sql += ` AND d.wear_level >= ?`;
-      params.push(min_wear);
+      params.push(Number(min_wear));
     }
     
-    if (max_wear) {
+    if (max_wear !== undefined) {
       sql += ` AND d.wear_level <= ?`;
-      params.push(max_wear);
+      params.push(Number(max_wear));
     }
     
     if (start_date) {
@@ -105,15 +100,34 @@ router.get('/drums', async (req, res) => {
     sql += ` ORDER BY d.updated_at DESC, d.id DESC`;
     
     const drums = await getQuery(sql, params);
+    
+    const enrichedDrums = drums.map(drum => {
+      let nextInspectionDate = null;
+      if (drum.last_inspection_date) {
+        const lastInspect = new Date(drum.last_inspection_date);
+        const intervalDays = drum.inspection_interval_days || 7;
+        nextInspectionDate = new Date(lastInspect.getTime() + intervalDays * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      } else {
+        const now = new Date();
+        const intervalDays = drum.inspection_interval_days || 7;
+        nextInspectionDate = new Date(now.getTime() + intervalDays * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      }
+      
+      return {
+        ...drum,
+        next_inspection_date: nextInspectionDate
+      };
+    });
+    
     res.json({
-      count: drums.length,
+      count: enrichedDrums.length,
       date_type_used: date_type,
       wear_severity_legend: {
         'mild/轻微': '0-3',
         'moderate/中度': '4-6',
         'severe/严重': '7-10'
       },
-      data: drums
+      data: enrichedDrums
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -160,7 +174,7 @@ router.get('/usage-records', async (req, res) => {
     
     if (is_overdue !== undefined) {
       sql += ` AND u.is_overdue = ?`;
-      params.push(is_overdue === 'true' ? 1 : 0);
+      params.push(is_overdue === 'true' || is_overdue === '1' ? 1 : 0);
     }
     
     sql += ` ORDER BY u.checkout_time DESC LIMIT 200`;
@@ -212,7 +226,7 @@ router.get('/inspection-records', async (req, res) => {
     
     if (needs_repair !== undefined) {
       sql += ` AND i.needs_repair = ?`;
-      params.push(needs_repair === 'true' ? 1 : 0);
+      params.push(needs_repair === 'true' || needs_repair === '1' ? 1 : 0);
     }
     
     sql += ` ORDER BY i.created_at DESC LIMIT 200`;
@@ -245,7 +259,7 @@ router.get('/stats/high-wear-drums', async (req, res) => {
       WHERE d.total_uses >= ?
       ORDER BY wear_per_use DESC, d.wear_level DESC
       LIMIT ?
-    `, [min_uses, limit]);
+    `, [Number(min_uses), Number(limit)]);
     
     res.json({
       title: '高损耗鼓具排行',
@@ -404,7 +418,7 @@ router.get('/stats/shift-anomalies', async (req, res) => {
       description: `最近${days}天各班次的异常情况统计（含磨损分析）`,
       time_range: {
         start: dateLimit,
-        end: new Date().toISOString()
+        end: getCurrentTimeISO()
       },
       overall: {
         total_uses: overallStats[0].total_records,
@@ -450,7 +464,7 @@ router.get('/stats/frequent-wear', async (req, res) => {
       GROUP BY d.id, d.drum_number, d.name, d.wear_level
       HAVING maintenance_count >= ?
       ORDER BY maintenance_count DESC
-    `, [dateLimit, threshold]);
+    `, [dateLimit, Number(threshold)]);
     
     res.json({
       title: '高频磨耗预警',
@@ -473,21 +487,35 @@ router.get('/stats/overdue-returns', async (req, res) => {
         u.*,
         d.drum_number,
         d.name as drum_name,
-        sh.name as shift_name,
-        ROUND((JULIANDAY(u.return_time) - JULIANDAY(u.expected_return_time)) * 24, 1) as overdue_hours
+        sh.name as shift_name
       FROM usage_records u
       JOIN drums d ON u.drum_id = d.id
       LEFT JOIN shifts sh ON u.shift_id = sh.id
       WHERE u.is_overdue = 1 AND u.return_time >= ?
-      ORDER BY overdue_hours DESC
+      ORDER BY u.return_time DESC
     `, [dateLimit]);
+    
+    const enrichedRecords = overdueRecords.map(record => {
+      let overdueHours = 0;
+      if (record.expected_return_time && record.return_time) {
+        const expected = new Date(record.expected_return_time);
+        const returned = new Date(record.return_time);
+        overdueHours = Math.round((returned - expected) / (1000 * 60 * 60) * 10) / 10;
+      }
+      return {
+        ...record,
+        overdue_hours: overdueHours
+      };
+    });
+    
+    const totalOverdueHours = enrichedRecords.reduce((sum, r) => sum + (r.overdue_hours || 0), 0);
     
     res.json({
       title: '归位超时记录',
       description: `最近${days}天的超时归还记录`,
-      count: overdueRecords.length,
-      total_overdue_hours: Math.round(overdueRecords.reduce((sum, r) => sum + (r.overdue_hours || 0), 0) * 10) / 10,
-      data: overdueRecords
+      count: enrichedRecords.length,
+      total_overdue_hours: Math.round(totalOverdueHours * 10) / 10,
+      data: enrichedRecords
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -505,30 +533,35 @@ router.get('/stats/unrepaired-after-patch', async (req, res) => {
         m.staff_name,
         m.created_at as patch_date,
         m.description,
-        d.current_status,
-        (
-          SELECT COUNT(*) 
-          FROM inspection_records i 
-          WHERE i.drum_id = d.id AND i.created_at > m.created_at
-        ) as inspections_after
+        d.current_status
       FROM maintenance_records m
       JOIN drums d ON m.drum_id = d.id
       WHERE m.skin_replaced = 1
         AND m.need_reinspection = 1
         AND m.reinspected = 0
-        AND (
-          SELECT COUNT(*) 
-          FROM inspection_records i 
-          WHERE i.drum_id = d.id AND i.created_at > m.created_at
-        ) = 0
       ORDER BY m.created_at ASC
     `);
+    
+    const enrichedRecords = await Promise.all(records.map(async (record) => {
+      const inspectionCount = await getOne(`
+        SELECT COUNT(*) as count 
+        FROM inspection_records i 
+        WHERE i.drum_id = ? AND i.created_at > ?
+      `, [record.drum_id, record.patch_date]);
+      
+      return {
+        ...record,
+        inspections_after: inspectionCount.count
+      };
+    }));
+    
+    const filteredRecords = enrichedRecords.filter(r => r.inspections_after === 0);
     
     res.json({
       title: '补皮后未复检清单',
       description: '更换鼓皮后需要但尚未进行复检的鼓具',
-      count: records.length,
-      data: records
+      count: filteredRecords.length,
+      data: filteredRecords
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -544,8 +577,8 @@ router.get('/status', async (req, res) => {
       ORDER BY count DESC
     `);
     
-    const totalDrums = await getQuery('SELECT COUNT(*) as total FROM drums');
-    const activeUsage = await getQuery('SELECT COUNT(*) as active FROM usage_records WHERE return_time IS NULL');
+    const totalDrums = await getOne('SELECT COUNT(*) as total FROM drums');
+    const activeUsage = await getOne('SELECT COUNT(*) as active FROM usage_records WHERE return_time IS NULL');
     const pendingMaintenance = await getQuery(`
       SELECT COUNT(*) as pending 
       FROM maintenance_records 
@@ -553,9 +586,9 @@ router.get('/status', async (req, res) => {
     `);
     
     res.json({
-      total_drums: totalDrums[0].total,
-      active_in_use: activeUsage[0].active,
-      pending_maintenance: pendingMaintenance[0].pending,
+      total_drums: totalDrums.total,
+      active_in_use: activeUsage.active,
+      pending_maintenance: pendingMaintenance.pending,
       status_distribution: statusCounts
     });
   } catch (err) {
@@ -595,17 +628,6 @@ router.get('/borrowed-drums', async (req, res) => {
         u.expected_return_time,
         sh.id as shift_id,
         sh.name as shift_name,
-        CASE 
-          WHEN u.expected_return_time IS NOT NULL AND DATETIME('now') > u.expected_return_time THEN 1 
-          ELSE 0 
-        END as is_overdue,
-        ROUND(
-          CASE 
-            WHEN u.expected_return_time IS NOT NULL AND DATETIME('now') > u.expected_return_time 
-            THEN (JULIANDAY('now') - JULIANDAY(u.expected_return_time)) * 24 
-            ELSE 0 
-          END, 2
-        ) as overdue_hours,
         (
           SELECT e.id 
           FROM extension_requests e 
@@ -621,10 +643,12 @@ router.get('/borrowed-drums', async (req, res) => {
           LIMIT 1
         ) as pending_extension_hours,
         (
-          SELECT MAX(e.new_expected_return_time) 
+          SELECT e.new_expected_return_time 
           FROM extension_requests e 
           WHERE e.usage_record_id = u.id 
             AND e.approval_status = 'approved'
+          ORDER BY e.created_at DESC
+          LIMIT 1
         ) as latest_approved_extension_time,
         (
           SELECT e.original_expected_return_time 
@@ -647,18 +671,6 @@ router.get('/borrowed-drums', async (req, res) => {
           ORDER BY e.created_at DESC
           LIMIT 1
         ) as latest_extension_status,
-        (
-          SELECT CASE e.approval_status
-            WHEN 'pending' THEN '待审批'
-            WHEN 'approved' THEN '已同意'
-            WHEN 'rejected' THEN '已拒绝'
-            ELSE e.approval_status
-          END
-          FROM extension_requests e 
-          WHERE e.usage_record_id = u.id 
-          ORDER BY e.created_at DESC
-          LIMIT 1
-        ) as latest_extension_status_label,
         (
           SELECT e.reason 
           FROM extension_requests e 
@@ -709,14 +721,6 @@ router.get('/borrowed-drums', async (req, res) => {
       params.push(`%${staff_name}%`);
     }
 
-    if (is_overdue !== undefined) {
-      if (is_overdue === 'true' || is_overdue === '1') {
-        sql += ` AND u.expected_return_time IS NOT NULL AND DATETIME('now') > u.expected_return_time`;
-      } else {
-        sql += ` AND (u.expected_return_time IS NULL OR DATETIME('now') <= u.expected_return_time)`;
-      }
-    }
-
     if (start_date) {
       sql += ` AND u.checkout_time >= ?`;
       params.push(start_date);
@@ -738,16 +742,34 @@ router.get('/borrowed-drums', async (req, res) => {
 
     const records = await getQuery(sql, params);
 
+    const now = new Date();
+    
     const enrichedRecords = records.map(record => {
       const currentExpectedReturn = record.latest_approved_extension_time || record.expected_return_time;
       const originalExpectedReturn = record.first_original_expected_return_time || record.expected_return_time;
 
-      const now = new Date();
       const currentExpected = new Date(currentExpectedReturn);
       const actualIsOverdue = now > currentExpected;
       const actualOverdueHours = actualIsOverdue
         ? Math.round((now - currentExpected) / (1000 * 60 * 60) * 100) / 100
         : 0;
+
+      let extensionStatusLabel = null;
+      if (record.latest_extension_status) {
+        switch (record.latest_extension_status) {
+          case 'pending':
+            extensionStatusLabel = '待审批';
+            break;
+          case 'approved':
+            extensionStatusLabel = '已同意';
+            break;
+          case 'rejected':
+            extensionStatusLabel = '已拒绝';
+            break;
+          default:
+            extensionStatusLabel = record.latest_extension_status;
+        }
+      }
 
       return {
         ...record,
@@ -755,17 +777,24 @@ router.get('/borrowed-drums', async (req, res) => {
         current_expected_return_time: currentExpectedReturn,
         is_overdue: actualIsOverdue ? 1 : 0,
         overdue_hours: actualOverdueHours,
-        has_extension_history: record.first_original_expected_return_time !== null
+        has_extension_history: record.first_original_expected_return_time !== null,
+        latest_extension_status_label: extensionStatusLabel
       };
     });
+
+    let filteredRecords = enrichedRecords;
+    if (is_overdue !== undefined) {
+      const wantOverdue = is_overdue === 'true' || is_overdue === '1';
+      filteredRecords = enrichedRecords.filter(r => (r.is_overdue === 1) === wantOverdue);
+    }
 
     res.json({
       title: '在借鼓具清单',
       description: '当前未归还的鼓具列表，含延期信息和超时状态',
-      count: enrichedRecords.length,
-      overdue_count: enrichedRecords.filter(r => r.is_overdue === 1).length,
-      pending_extension_count: enrichedRecords.filter(r => r.pending_extension_id !== null).length,
-      extension_count: enrichedRecords.filter(r => r.has_extension_history).length,
+      count: filteredRecords.length,
+      overdue_count: filteredRecords.filter(r => r.is_overdue === 1).length,
+      pending_extension_count: filteredRecords.filter(r => r.pending_extension_id !== null).length,
+      extension_count: filteredRecords.filter(r => r.has_extension_history).length,
       filters: {
         shift_id: shift_id || null,
         staff_name: staff_name || null,
@@ -778,7 +807,7 @@ router.get('/borrowed-drums', async (req, res) => {
         'approved': '已同意',
         'rejected': '已拒绝'
       },
-      data: enrichedRecords
+      data: filteredRecords
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -811,29 +840,7 @@ router.get('/extension-records', async (req, res) => {
         u.shift_id,
         sh.name as shift_name,
         u.checkout_time,
-        u.return_time,
-        CASE 
-          WHEN u.return_time IS NOT NULL THEN '已归还'
-          WHEN e.approval_status = 'approved' AND e.new_expected_return_time IS NOT NULL 
-            AND DATETIME('now') > e.new_expected_return_time THEN 1
-          WHEN e.approval_status != 'approved' AND u.expected_return_time IS NOT NULL 
-            AND DATETIME('now') > u.expected_return_time THEN 1
-          ELSE 0 
-        END as is_overdue,
-        CASE 
-          WHEN u.return_time IS NOT NULL THEN 0
-          WHEN e.approval_status = 'approved' AND e.new_expected_return_time IS NOT NULL 
-            THEN ROUND(MAX(0, (JULIANDAY('now') - JULIANDAY(e.new_expected_return_time)) * 24), 2)
-          WHEN e.approval_status != 'approved' AND u.expected_return_time IS NOT NULL 
-            THEN ROUND(MAX(0, (JULIANDAY('now') - JULIANDAY(u.expected_return_time)) * 24), 2)
-          ELSE 0 
-        END as overdue_hours,
-        CASE e.approval_status
-          WHEN 'pending' THEN '待审批'
-          WHEN 'approved' THEN '已同意'
-          WHEN 'rejected' THEN '已拒绝'
-          ELSE e.approval_status
-        END as approval_status_label
+        u.return_time
       FROM extension_requests e
       JOIN drums d ON e.drum_id = d.id
       JOIN usage_records u ON e.usage_record_id = u.id
@@ -876,50 +883,61 @@ router.get('/extension-records', async (req, res) => {
 
     const records = await getQuery(sql, params);
 
-    const enrichedRecords = records.map(record => {
-      const now = new Date();
-      let currentExpectedReturn;
+    const now = new Date();
 
+    const enrichedRecords = records.map(record => {
+      let currentExpectedReturn;
+      
       if (record.approval_status === 'approved' && record.new_expected_return_time) {
-        currentExpectedReturn = new Date(record.new_expected_return_time);
+        currentExpectedReturn = record.new_expected_return_time;
       } else {
-        currentExpectedReturn = new Date(record.original_expected_return_time);
+        currentExpectedReturn = record.original_expected_return_time;
       }
 
-      const actualIsOverdue = record.return_time ? false : now > currentExpectedReturn;
+      const expectedDate = new Date(currentExpectedReturn);
+      const actualIsOverdue = record.return_time ? false : now > expectedDate;
       const actualOverdueHours = actualIsOverdue && !record.return_time
-        ? Math.round((now - currentExpectedReturn) / (1000 * 60 * 60) * 100) / 100
+        ? Math.round((now - expectedDate) / (1000 * 60 * 60) * 100) / 100
         : 0;
 
-      let isOverdueMatch = true;
-      if (is_overdue !== undefined) {
-        const wantOverdue = is_overdue === 'true' || is_overdue === '1';
-        isOverdueMatch = actualIsOverdue === wantOverdue;
+      let approvalStatusLabel;
+      switch (record.approval_status) {
+        case 'pending':
+          approvalStatusLabel = '待审批';
+          break;
+        case 'approved':
+          approvalStatusLabel = '已同意';
+          break;
+        case 'rejected':
+          approvalStatusLabel = '已拒绝';
+          break;
+        default:
+          approvalStatusLabel = record.approval_status;
       }
 
       return {
         ...record,
         is_overdue: actualIsOverdue ? 1 : 0,
         overdue_hours: actualOverdueHours,
-        current_expected_return_time: record.approval_status === 'approved' && record.new_expected_return_time
-          ? record.new_expected_return_time
-          : record.original_expected_return_time,
-        _matches_overdue_filter: isOverdueMatch
+        current_expected_return_time: currentExpectedReturn,
+        approval_status_label: approvalStatusLabel
       };
-    }).filter(record => record._matches_overdue_filter)
-      .map(record => {
-        const { _matches_overdue_filter, ...rest } = record;
-        return rest;
-      });
+    });
+
+    let filteredRecords = enrichedRecords;
+    if (is_overdue !== undefined) {
+      const wantOverdue = is_overdue === 'true' || is_overdue === '1';
+      filteredRecords = enrichedRecords.filter(r => (r.is_overdue === 1) === wantOverdue);
+    }
 
     res.json({
       title: '延期申请记录',
       description: '所有借用延期申请记录，支持多维度筛选',
-      count: enrichedRecords.length,
-      approved_count: enrichedRecords.filter(r => r.approval_status === 'approved').length,
-      rejected_count: enrichedRecords.filter(r => r.approval_status === 'rejected').length,
-      pending_count: enrichedRecords.filter(r => r.approval_status === 'pending').length,
-      overdue_count: enrichedRecords.filter(r => r.is_overdue === 1).length,
+      count: filteredRecords.length,
+      approved_count: filteredRecords.filter(r => r.approval_status === 'approved').length,
+      rejected_count: filteredRecords.filter(r => r.approval_status === 'rejected').length,
+      pending_count: filteredRecords.filter(r => r.approval_status === 'pending').length,
+      overdue_count: filteredRecords.filter(r => r.is_overdue === 1).length,
       filters: {
         shift_id: shift_id || null,
         staff_name: staff_name || null,
@@ -932,7 +950,7 @@ router.get('/extension-records', async (req, res) => {
         'approved': '已同意',
         'rejected': '已拒绝'
       },
-      data: enrichedRecords
+      data: filteredRecords
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

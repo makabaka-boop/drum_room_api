@@ -4,6 +4,106 @@ const path = require('path');
 const dbPath = path.join(__dirname, 'drum_room.db');
 const db = new sqlite3.Database(dbPath);
 
+const runQuery = (sql, params = []) => {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function(err) {
+      if (err) reject(err);
+      else resolve({ id: this.lastID, changes: this.changes });
+    });
+  });
+};
+
+const getQuery = (sql, params = []) => {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows);
+    });
+  });
+};
+
+const getOne = (sql, params = []) => {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+};
+
+const beginTransaction = () => {
+  return new Promise((resolve, reject) => {
+    db.run('BEGIN TRANSACTION', (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+};
+
+const commitTransaction = () => {
+  return new Promise((resolve, reject) => {
+    db.run('COMMIT', (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+};
+
+const rollbackTransaction = () => {
+  return new Promise((resolve, reject) => {
+    db.run('ROLLBACK', (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+};
+
+const withTransaction = async (operation) => {
+  try {
+    await beginTransaction();
+    const result = await operation();
+    await commitTransaction();
+    return result;
+  } catch (err) {
+    await rollbackTransaction();
+    throw err;
+  }
+};
+
+const VALID_STATUSES = ['待领出', '已领出', '待巡检', '维护中', '停用中', '恢复可用'];
+
+const isValidStatus = (status) => VALID_STATUSES.includes(status);
+
+const validatePositiveInteger = (value, fieldName) => {
+  const num = Number(value);
+  if (!Number.isInteger(num) || num < 0) {
+    throw new Error(`${fieldName} 必须是非负整数`);
+  }
+  return num;
+};
+
+const validateRequiredString = (value, fieldName, maxLength = 255) => {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(`${fieldName} 不能为空`);
+  }
+  if (value.length > maxLength) {
+    throw new Error(`${fieldName} 长度不能超过 ${maxLength} 个字符`);
+  }
+  return value.trim();
+};
+
+const validateWearLevel = (value, fieldName = '磨损等级') => {
+  const num = Number(value);
+  if (isNaN(num) || num < 0 || num > 10) {
+    throw new Error(`${fieldName} 必须在 0-10 之间`);
+  }
+  return num;
+};
+
+const getCurrentTimeISO = () => {
+  return new Date().toISOString();
+};
+
 const initDatabase = () => {
   return new Promise((resolve, reject) => {
     db.serialize(() => {
@@ -164,4 +264,20 @@ const initDatabase = () => {
   });
 };
 
-module.exports = { db, initDatabase };
+module.exports = { 
+  db, 
+  initDatabase,
+  runQuery,
+  getQuery,
+  getOne,
+  beginTransaction,
+  commitTransaction,
+  rollbackTransaction,
+  withTransaction,
+  VALID_STATUSES,
+  isValidStatus,
+  validatePositiveInteger,
+  validateRequiredString,
+  validateWearLevel,
+  getCurrentTimeISO
+};
