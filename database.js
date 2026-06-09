@@ -4,6 +4,52 @@ const path = require('path');
 const dbPath = path.join(__dirname, 'drum_room.db');
 const db = new sqlite3.Database(dbPath);
 
+const runQuery = (sql, params = []) => {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function(err) {
+      if (err) reject(err);
+      else resolve({ id: this.lastID, changes: this.changes });
+    });
+  });
+};
+
+const getQuery = (sql, params = []) => {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows);
+    });
+  });
+};
+
+const getOne = (sql, params = []) => {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+};
+
+const nowISO = () => new Date().toISOString();
+
+let txQueue = Promise.resolve();
+const withTransaction = (fn) => {
+  const next = txQueue.then(async () => {
+    await runQuery('BEGIN IMMEDIATE');
+    try {
+      const result = await fn();
+      await runQuery('COMMIT');
+      return result;
+    } catch (err) {
+      try { await runQuery('ROLLBACK'); } catch (_) { /* ignore */ }
+      throw err;
+    }
+  });
+  txQueue = next.then(() => {}, () => {});
+  return next;
+};
+
 const initDatabase = () => {
   return new Promise((resolve, reject) => {
     db.serialize(() => {
@@ -164,4 +210,4 @@ const initDatabase = () => {
   });
 };
 
-module.exports = { db, initDatabase };
+module.exports = { db, initDatabase, runQuery, getQuery, getOne, nowISO, withTransaction };
