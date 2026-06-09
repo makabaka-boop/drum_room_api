@@ -1,15 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { db } = require('../database');
-
-const getQuery = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) reject(err);
-      else resolve(rows);
-    });
-  });
-};
+const { db, getQuery, parseUTCDate, formatDateTime, nowFormatted } = require('../database');
 
 router.get('/drums', async (req, res) => {
   try {
@@ -298,7 +289,7 @@ router.get('/stats/pending-reinspection', async (req, res) => {
 router.get('/stats/shift-anomalies', async (req, res) => {
   try {
     const { days = 30 } = req.query;
-    const dateLimit = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const dateLimit = formatDateTime(new Date(Date.now() - days * 24 * 60 * 60 * 1000));
     
     const shiftStats = await getQuery(`
       SELECT 
@@ -404,7 +395,7 @@ router.get('/stats/shift-anomalies', async (req, res) => {
       description: `最近${days}天各班次的异常情况统计（含磨损分析）`,
       time_range: {
         start: dateLimit,
-        end: new Date().toISOString()
+        end: nowFormatted()
       },
       overall: {
         total_uses: overallStats[0].total_records,
@@ -432,7 +423,7 @@ router.get('/stats/shift-anomalies', async (req, res) => {
 router.get('/stats/frequent-wear', async (req, res) => {
   try {
     const { days = 14, threshold = 3 } = req.query;
-    const dateLimit = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const dateLimit = formatDateTime(new Date(Date.now() - days * 24 * 60 * 60 * 1000));
     
     const frequentWear = await getQuery(`
       SELECT 
@@ -466,7 +457,7 @@ router.get('/stats/frequent-wear', async (req, res) => {
 router.get('/stats/overdue-returns', async (req, res) => {
   try {
     const { days = 7 } = req.query;
-    const dateLimit = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const dateLimit = formatDateTime(new Date(Date.now() - days * 24 * 60 * 60 * 1000));
     
     const overdueRecords = await getQuery(`
       SELECT 
@@ -739,22 +730,12 @@ router.get('/borrowed-drums', async (req, res) => {
     const records = await getQuery(sql, params);
 
     const enrichedRecords = records.map(record => {
-      const currentExpectedReturn = record.latest_approved_extension_time || record.expected_return_time;
       const originalExpectedReturn = record.first_original_expected_return_time || record.expected_return_time;
-
-      const now = new Date();
-      const currentExpected = new Date(currentExpectedReturn);
-      const actualIsOverdue = now > currentExpected;
-      const actualOverdueHours = actualIsOverdue
-        ? Math.round((now - currentExpected) / (1000 * 60 * 60) * 100) / 100
-        : 0;
 
       return {
         ...record,
         original_expected_return_time: originalExpectedReturn,
-        current_expected_return_time: currentExpectedReturn,
-        is_overdue: actualIsOverdue ? 1 : 0,
-        overdue_hours: actualOverdueHours,
+        current_expected_return_time: record.expected_return_time,
         has_extension_history: record.first_original_expected_return_time !== null
       };
     });
@@ -812,22 +793,7 @@ router.get('/extension-records', async (req, res) => {
         sh.name as shift_name,
         u.checkout_time,
         u.return_time,
-        CASE 
-          WHEN u.return_time IS NOT NULL THEN '已归还'
-          WHEN e.approval_status = 'approved' AND e.new_expected_return_time IS NOT NULL 
-            AND DATETIME('now') > e.new_expected_return_time THEN 1
-          WHEN e.approval_status != 'approved' AND u.expected_return_time IS NOT NULL 
-            AND DATETIME('now') > u.expected_return_time THEN 1
-          ELSE 0 
-        END as is_overdue,
-        CASE 
-          WHEN u.return_time IS NOT NULL THEN 0
-          WHEN e.approval_status = 'approved' AND e.new_expected_return_time IS NOT NULL 
-            THEN ROUND(MAX(0, (JULIANDAY('now') - JULIANDAY(e.new_expected_return_time)) * 24), 2)
-          WHEN e.approval_status != 'approved' AND u.expected_return_time IS NOT NULL 
-            THEN ROUND(MAX(0, (JULIANDAY('now') - JULIANDAY(u.expected_return_time)) * 24), 2)
-          ELSE 0 
-        END as overdue_hours,
+        u.expected_return_time as actual_current_expected_return_time,
         CASE e.approval_status
           WHEN 'pending' THEN '待审批'
           WHEN 'approved' THEN '已同意'
@@ -877,17 +843,10 @@ router.get('/extension-records', async (req, res) => {
     const records = await getQuery(sql, params);
 
     const enrichedRecords = records.map(record => {
+      const currentExpectedReturn = parseUTCDate(record.actual_current_expected_return_time);
       const now = new Date();
-      let currentExpectedReturn;
-
-      if (record.approval_status === 'approved' && record.new_expected_return_time) {
-        currentExpectedReturn = new Date(record.new_expected_return_time);
-      } else {
-        currentExpectedReturn = new Date(record.original_expected_return_time);
-      }
-
-      const actualIsOverdue = record.return_time ? false : now > currentExpectedReturn;
-      const actualOverdueHours = actualIsOverdue && !record.return_time
+      const actualIsOverdue = record.return_time ? false : (currentExpectedReturn ? now > currentExpectedReturn : false);
+      const actualOverdueHours = actualIsOverdue && currentExpectedReturn
         ? Math.round((now - currentExpectedReturn) / (1000 * 60 * 60) * 100) / 100
         : 0;
 
@@ -901,14 +860,12 @@ router.get('/extension-records', async (req, res) => {
         ...record,
         is_overdue: actualIsOverdue ? 1 : 0,
         overdue_hours: actualOverdueHours,
-        current_expected_return_time: record.approval_status === 'approved' && record.new_expected_return_time
-          ? record.new_expected_return_time
-          : record.original_expected_return_time,
+        current_expected_return_time: record.actual_current_expected_return_time,
         _matches_overdue_filter: isOverdueMatch
       };
     }).filter(record => record._matches_overdue_filter)
       .map(record => {
-        const { _matches_overdue_filter, ...rest } = record;
+        const { _matches_overdue_filter, actual_current_expected_return_time, ...rest } = record;
         return rest;
       });
 

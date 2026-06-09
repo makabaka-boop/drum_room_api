@@ -1,40 +1,18 @@
 const express = require('express');
 const router = express.Router();
-const { db } = require('../database');
+const { db, runQuery, getQuery, getOne, runTransaction, nowFormatted } = require('../database');
 
-const runQuery = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function(err) {
-      if (err) reject(err);
-      else resolve({ id: this.lastID, changes: this.changes });
-    });
-  });
-};
-
-const getQuery = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) reject(err);
-      else resolve(rows);
-    });
-  });
-};
-
-const getOne = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) reject(err);
-      else resolve(row);
-    });
-  });
-};
+const VALID_STATUSES = ['待领出', '已领出', '待巡检', '维护中', '停用中', '恢复可用'];
 
 router.post('/shifts', async (req, res) => {
   try {
     const { name, description } = req.body;
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: '班次名称不能为空' });
+    }
     const result = await runQuery(
       'INSERT INTO shifts (name, description) VALUES (?, ?)',
-      [name, description]
+      [String(name).trim(), description]
     );
     res.json({ id: result.id, name, description });
   } catch (err) {
@@ -54,9 +32,12 @@ router.get('/shifts', async (req, res) => {
 router.put('/shifts/:id', async (req, res) => {
   try {
     const { name, description } = req.body;
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: '班次名称不能为空' });
+    }
     await runQuery(
       'UPDATE shifts SET name = ?, description = ? WHERE id = ?',
-      [name, description, req.params.id]
+      [String(name).trim(), description, req.params.id]
     );
     const shift = await getOne('SELECT * FROM shifts WHERE id = ?', [req.params.id]);
     res.json(shift);
@@ -67,19 +48,26 @@ router.put('/shifts/:id', async (req, res) => {
 
 router.delete('/shifts/:id', async (req, res) => {
   try {
+    const referencedDrums = await getOne('SELECT COUNT(*) as count FROM drums WHERE shift_id = ?', [req.params.id]);
+    if (referencedDrums.count > 0) {
+      return res.status(400).json({ error: `该班次仍被 ${referencedDrums.count} 个鼓具引用，无法删除` });
+    }
     await runQuery('DELETE FROM shifts WHERE id = ?', [req.params.id]);
     res.json({ message: 'Shift deleted' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(400).json({ error: err.message });
   }
 });
 
 router.post('/positions', async (req, res) => {
   try {
     const { name, description } = req.body;
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: '位置名称不能为空' });
+    }
     const result = await runQuery(
       'INSERT INTO rack_positions (name, description) VALUES (?, ?)',
-      [name, description]
+      [String(name).trim(), description]
     );
     res.json({ id: result.id, name, description });
   } catch (err) {
@@ -99,9 +87,12 @@ router.get('/positions', async (req, res) => {
 router.put('/positions/:id', async (req, res) => {
   try {
     const { name, description } = req.body;
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: '位置名称不能为空' });
+    }
     await runQuery(
       'UPDATE rack_positions SET name = ?, description = ? WHERE id = ?',
-      [name, description, req.params.id]
+      [String(name).trim(), description, req.params.id]
     );
     const position = await getOne('SELECT * FROM rack_positions WHERE id = ?', [req.params.id]);
     res.json(position);
@@ -112,19 +103,26 @@ router.put('/positions/:id', async (req, res) => {
 
 router.delete('/positions/:id', async (req, res) => {
   try {
+    const referencedDrums = await getOne('SELECT COUNT(*) as count FROM drums WHERE position_id = ?', [req.params.id]);
+    if (referencedDrums.count > 0) {
+      return res.status(400).json({ error: `该位置仍被 ${referencedDrums.count} 个鼓具引用，无法删除` });
+    }
     await runQuery('DELETE FROM rack_positions WHERE id = ?', [req.params.id]);
     res.json({ message: 'Position deleted' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(400).json({ error: err.message });
   }
 });
 
 router.post('/skins', async (req, res) => {
   try {
     const { batch_number, type, brand, purchase_date } = req.body;
+    if (!batch_number || !String(batch_number).trim()) {
+      return res.status(400).json({ error: '批次号不能为空' });
+    }
     const result = await runQuery(
       'INSERT INTO drum_skins (batch_number, type, brand, purchase_date) VALUES (?, ?, ?, ?)',
-      [batch_number, type, brand, purchase_date]
+      [String(batch_number).trim(), type, brand, purchase_date]
     );
     res.json({ id: result.id, batch_number, type, brand, purchase_date });
   } catch (err) {
@@ -144,9 +142,12 @@ router.get('/skins', async (req, res) => {
 router.put('/skins/:id', async (req, res) => {
   try {
     const { batch_number, type, brand, purchase_date } = req.body;
+    if (!batch_number || !String(batch_number).trim()) {
+      return res.status(400).json({ error: '批次号不能为空' });
+    }
     await runQuery(
       'UPDATE drum_skins SET batch_number = ?, type = ?, brand = ?, purchase_date = ? WHERE id = ?',
-      [batch_number, type, brand, purchase_date, req.params.id]
+      [String(batch_number).trim(), type, brand, purchase_date, req.params.id]
     );
     const skin = await getOne('SELECT * FROM drum_skins WHERE id = ?', [req.params.id]);
     res.json(skin);
@@ -157,20 +158,37 @@ router.put('/skins/:id', async (req, res) => {
 
 router.delete('/skins/:id', async (req, res) => {
   try {
+    const referencedDrums = await getOne('SELECT COUNT(*) as count FROM drums WHERE skin_id = ?', [req.params.id]);
+    if (referencedDrums.count > 0) {
+      return res.status(400).json({ error: `该鼓皮仍被 ${referencedDrums.count} 个鼓具引用，无法删除` });
+    }
+    const referencedMaintenance = await getOne('SELECT COUNT(*) as count FROM maintenance_records WHERE new_skin_id = ?', [req.params.id]);
+    if (referencedMaintenance.count > 0) {
+      return res.status(400).json({ error: `该鼓皮仍被 ${referencedMaintenance.count} 条维修记录引用，无法删除` });
+    }
     await runQuery('DELETE FROM drum_skins WHERE id = ?', [req.params.id]);
     res.json({ message: 'Drum skin deleted' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(400).json({ error: err.message });
   }
 });
 
 router.post('/drums', async (req, res) => {
   try {
     const { drum_number, name, type, size, skin_id, position_id, shift_id, inspection_interval_days } = req.body;
+    if (!drum_number || !String(drum_number).trim()) {
+      return res.status(400).json({ error: '鼓具编号不能为空' });
+    }
+    if (inspection_interval_days !== undefined && inspection_interval_days !== null) {
+      const val = Number(inspection_interval_days);
+      if (isNaN(val) || !Number.isInteger(val) || val < 1) {
+        return res.status(400).json({ error: '巡检间隔天数必须为正整数' });
+      }
+    }
     const result = await runQuery(
       `INSERT INTO drums (drum_number, name, type, size, skin_id, position_id, shift_id, current_status, inspection_interval_days) 
        VALUES (?, ?, ?, ?, ?, ?, ?, '待领出', COALESCE(?, 7))`,
-      [drum_number, name, type, size, skin_id, position_id, shift_id, inspection_interval_days]
+      [String(drum_number).trim(), name, type, size, skin_id, position_id, shift_id, inspection_interval_days]
     );
     const drum = await getOne(`
       SELECT d.*, 
@@ -255,14 +273,61 @@ router.get('/drums/:id', async (req, res) => {
 router.put('/drums/:id', async (req, res) => {
   try {
     const { drum_number, name, type, size, skin_id, position_id, shift_id, current_status, tension, wear_level, inspection_interval_days } = req.body;
+
+    if (drum_number !== undefined && (!drum_number || !String(drum_number).trim())) {
+      return res.status(400).json({ error: '鼓具编号不能为空' });
+    }
+
+    if (current_status !== undefined && current_status !== null) {
+      if (!VALID_STATUSES.includes(current_status)) {
+        return res.status(400).json({ error: `无效的状态值: ${current_status}，有效值为: ${VALID_STATUSES.join(', ')}` });
+      }
+    }
+
+    if (wear_level !== undefined && wear_level !== null) {
+      const wl = Number(wear_level);
+      if (isNaN(wl) || !Number.isInteger(wl) || wl < 0 || wl > 10) {
+        return res.status(400).json({ error: '磨损等级必须为0-10的整数' });
+      }
+    }
+
+    if (inspection_interval_days !== undefined && inspection_interval_days !== null) {
+      const val = Number(inspection_interval_days);
+      if (isNaN(val) || !Number.isInteger(val) || val < 1) {
+        return res.status(400).json({ error: '巡检间隔天数必须为正整数' });
+      }
+    }
+
+    const existingDrum = await getOne('SELECT * FROM drums WHERE id = ?', [req.params.id]);
+    if (!existingDrum) {
+      return res.status(404).json({ error: 'Drum not found' });
+    }
+
+    if (current_status && current_status !== existingDrum.current_status) {
+      if (existingDrum.current_status === '已领出' && current_status !== '已领出') {
+        const activeUsage = await getOne('SELECT * FROM usage_records WHERE drum_id = ? AND return_time IS NULL', [req.params.id]);
+        if (activeUsage) {
+          return res.status(400).json({ error: '该鼓具存在未归还记录，不可手动修改状态' });
+        }
+      }
+      if (existingDrum.current_status === '维护中' && current_status === '待领出') {
+        const activeMaintenance = await getOne('SELECT COUNT(*) as count FROM maintenance_records WHERE drum_id = ? AND end_time IS NULL', [req.params.id]);
+        if (activeMaintenance.count > 0) {
+          return res.status(400).json({ error: '该鼓具存在未完成的维修记录，不可手动改为待领出' });
+        }
+      }
+    }
+
+    const updateTime = nowFormatted();
+
     await runQuery(
       `UPDATE drums 
        SET drum_number = ?, name = ?, type = ?, size = ?, skin_id = ?, position_id = ?, 
            shift_id = ?, current_status = ?, tension = ?, wear_level = ?, 
            inspection_interval_days = COALESCE(?, inspection_interval_days),
-           updated_at = CURRENT_TIMESTAMP
+           updated_at = ?
        WHERE id = ?`,
-      [drum_number, name, type, size, skin_id, position_id, shift_id, current_status, tension, wear_level, inspection_interval_days, req.params.id]
+      [drum_number, name, type, size, skin_id, position_id, shift_id, current_status, tension, wear_level, inspection_interval_days, updateTime, req.params.id]
     );
     const drum = await getOne(`
       SELECT d.*, 
@@ -283,10 +348,39 @@ router.put('/drums/:id', async (req, res) => {
 
 router.delete('/drums/:id', async (req, res) => {
   try {
+    const drum = await getOne('SELECT * FROM drums WHERE id = ?', [req.params.id]);
+    if (!drum) {
+      return res.status(404).json({ error: 'Drum not found' });
+    }
+
+    const activeUsage = await getOne('SELECT COUNT(*) as count FROM usage_records WHERE drum_id = ? AND return_time IS NULL', [req.params.id]);
+    if (activeUsage.count > 0) {
+      return res.status(400).json({ error: '该鼓具存在未归还记录，无法删除' });
+    }
+
+    const activeMaintenance = await getOne('SELECT COUNT(*) as count FROM maintenance_records WHERE drum_id = ? AND end_time IS NULL', [req.params.id]);
+    if (activeMaintenance.count > 0) {
+      return res.status(400).json({ error: '该鼓具存在未完成的维修记录，无法删除' });
+    }
+
+    const pendingDeactivation = await getOne('SELECT COUNT(*) as count FROM deactivation_requests WHERE drum_id = ? AND approved = 0', [req.params.id]);
+    if (pendingDeactivation.count > 0) {
+      return res.status(400).json({ error: '该鼓具存在待审批的停用申请，无法删除' });
+    }
+
+    const pendingExtension = await getOne(`
+      SELECT COUNT(*) as count FROM extension_requests e
+      JOIN usage_records u ON e.usage_record_id = u.id
+      WHERE e.drum_id = ? AND e.approval_status = 'pending' AND u.return_time IS NULL
+    `, [req.params.id]);
+    if (pendingExtension.count > 0) {
+      return res.status(400).json({ error: '该鼓具存在待审批的延期申请，无法删除' });
+    }
+
     await runQuery('DELETE FROM drums WHERE id = ?', [req.params.id]);
     res.json({ message: 'Drum deleted' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(400).json({ error: err.message });
   }
 });
 
@@ -313,27 +407,41 @@ router.post('/maintenance/:id/complete', async (req, res) => {
     if (!recordBefore) {
       return res.status(404).json({ error: 'Maintenance record not found' });
     }
-    
-    const shouldMarkReinspected = reinspected === true || recordBefore.need_reinspection === 0;
-    
-    await runQuery(
-      `UPDATE maintenance_records 
-       SET end_time = CURRENT_TIMESTAMP, 
-           notes = COALESCE(?, notes),
-           reinspected = ?,
-           reinspection_date = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE reinspection_date END
-       WHERE id = ?`,
-      [notes, shouldMarkReinspected ? 1 : 0, shouldMarkReinspected ? 1 : 0, req.params.id]
-    );
-    
-    const record = await getOne('SELECT * FROM maintenance_records WHERE id = ?', [req.params.id]);
-    
-    if (record.need_reinspection === 1 && record.reinspected === 0) {
-      await runQuery('UPDATE drums SET current_status = ? WHERE id = ?', ['待巡检', record.drum_id]);
-    } else {
-      await runQuery('UPDATE drums SET current_status = ? WHERE id = ?', ['待领出', record.drum_id]);
+
+    if (recordBefore.end_time) {
+      return res.status(400).json({ error: '该维修记录已完成，不可重复操作' });
     }
-    
+
+    const shouldMarkReinspected = reinspected === true || recordBefore.need_reinspection === 0;
+    const completeTime = nowFormatted();
+
+    await runTransaction(async () => {
+      await runQuery(
+        `UPDATE maintenance_records 
+         SET end_time = ?, 
+             notes = COALESCE(?, notes),
+             reinspected = ?,
+             reinspection_date = CASE WHEN ? = 1 THEN ? ELSE reinspection_date END
+         WHERE id = ?`,
+        [completeTime, notes, shouldMarkReinspected ? 1 : 0, shouldMarkReinspected ? 1 : 0, completeTime, req.params.id]
+      );
+
+      const record = await getOne('SELECT * FROM maintenance_records WHERE id = ?', [req.params.id]);
+
+      const otherActiveMaintenance = await getOne(
+        'SELECT COUNT(*) as count FROM maintenance_records WHERE drum_id = ? AND end_time IS NULL AND id != ?',
+        [record.drum_id, req.params.id]
+      );
+
+      if (record.need_reinspection === 1 && record.reinspected === 0) {
+        await runQuery('UPDATE drums SET current_status = ?, updated_at = ? WHERE id = ?', ['待巡检', completeTime, record.drum_id]);
+      } else if (otherActiveMaintenance.count === 0) {
+        await runQuery('UPDATE drums SET current_status = ?, updated_at = ? WHERE id = ?', ['待领出', completeTime, record.drum_id]);
+      }
+    });
+
+    const record = await getOne('SELECT * FROM maintenance_records WHERE id = ?', [req.params.id]);
+
     res.json({ 
       message: 'Maintenance completed', 
       record,
@@ -348,7 +456,7 @@ router.post('/extension/:id/approve', async (req, res) => {
   try {
     const { approved_by, approval_notes } = req.body;
 
-    if (!approved_by) {
+    if (!approved_by || !String(approved_by).trim()) {
       return res.status(400).json({ error: '缺少审批人信息: approved_by' });
     }
 
@@ -370,23 +478,30 @@ router.post('/extension/:id/approve', async (req, res) => {
       return res.status(400).json({ error: '该鼓具已归还，无法审批延期' });
     }
 
-    await runQuery(
-      `UPDATE extension_requests 
-       SET approval_status = 'approved', 
-           approved_by = ?, 
-           approved_at = CURRENT_TIMESTAMP,
-           approval_notes = ?,
-           new_expected_return_time = ?
-       WHERE id = ?`,
-      [approved_by, approval_notes, request.new_expected_return_time, req.params.id]
-    );
+    const approveTime = nowFormatted();
 
-    await runQuery(
-      `UPDATE usage_records 
-       SET expected_return_time = ?
-       WHERE id = ?`,
-      [request.new_expected_return_time, request.usage_record_id]
-    );
+    await runTransaction(async () => {
+      await runQuery(
+        `UPDATE extension_requests 
+         SET approval_status = 'approved', 
+             approved_by = ?, 
+             approved_at = ?,
+             approval_notes = ?,
+             new_expected_return_time = ?
+         WHERE id = ?`,
+        [approved_by, approveTime, approval_notes, request.new_expected_return_time, req.params.id]
+      );
+
+      await runQuery(
+        `UPDATE usage_records 
+         SET expected_return_time = CASE 
+           WHEN ? > expected_return_time THEN ?
+           ELSE expected_return_time
+         END
+         WHERE id = ?`,
+        [request.new_expected_return_time, request.new_expected_return_time, request.usage_record_id]
+      );
+    });
 
     const updatedRequest = await getOne(`
       SELECT e.*, d.drum_number, d.name as drum_name, u.expected_return_time as current_expected_return_time
@@ -409,7 +524,7 @@ router.post('/extension/:id/reject', async (req, res) => {
   try {
     const { approved_by, approval_notes } = req.body;
 
-    if (!approved_by) {
+    if (!approved_by || !String(approved_by).trim()) {
       return res.status(400).json({ error: '缺少审批人信息: approved_by' });
     }
 
@@ -422,15 +537,16 @@ router.post('/extension/:id/reject', async (req, res) => {
       return res.status(400).json({ error: `该申请已被${request.approval_status === 'approved' ? '批准' : '拒绝'}，不可重复审批` });
     }
 
+    const rejectTime = nowFormatted();
+
     await runQuery(
       `UPDATE extension_requests 
        SET approval_status = 'rejected', 
            approved_by = ?, 
-           approved_at = CURRENT_TIMESTAMP,
-           approval_notes = ?,
-           new_expected_return_time = NULL
+           approved_at = ?,
+           approval_notes = ?
        WHERE id = ?`,
-      [approved_by, approval_notes, req.params.id]
+      [approved_by, rejectTime, approval_notes, req.params.id]
     );
 
     const updatedRequest = await getOne(`
