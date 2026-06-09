@@ -4,6 +4,66 @@ const path = require('path');
 const dbPath = path.join(__dirname, 'drum_room.db');
 const db = new sqlite3.Database(dbPath);
 
+const runQuery = (sql, params = []) => {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function(err) {
+      if (err) reject(err);
+      else resolve({ id: this.lastID, changes: this.changes });
+    });
+  });
+};
+
+const getQuery = (sql, params = []) => {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows);
+    });
+  });
+};
+
+const getOne = (sql, params = []) => {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+};
+
+const runTransaction = async (callback) => {
+  await runQuery('BEGIN');
+  try {
+    const result = await callback();
+    await runQuery('COMMIT');
+    return result;
+  } catch (err) {
+    try { await runQuery('ROLLBACK'); } catch (_) {}
+    throw err;
+  }
+};
+
+const formatDateTime = (date) => {
+  return date.getUTCFullYear() + '-' +
+    String(date.getUTCMonth() + 1).padStart(2, '0') + '-' +
+    String(date.getUTCDate()).padStart(2, '0') + ' ' +
+    String(date.getUTCHours()).padStart(2, '0') + ':' +
+    String(date.getUTCMinutes()).padStart(2, '0') + ':' +
+    String(date.getUTCSeconds()).padStart(2, '0');
+};
+
+const nowFormatted = () => formatDateTime(new Date());
+
+const nowPlusHours = (hours) => formatDateTime(new Date(Date.now() + hours * 3600000));
+
+const parseUTCDate = (dateStr) => {
+  if (!dateStr) return null;
+  if (typeof dateStr === 'string' && dateStr.includes('T')) {
+    return new Date(dateStr);
+  }
+  return new Date(dateStr.replace(' ', 'T') + 'Z');
+};
+
 const initDatabase = () => {
   return new Promise((resolve, reject) => {
     db.serialize(() => {
@@ -164,4 +224,4 @@ const initDatabase = () => {
   });
 };
 
-module.exports = { db, initDatabase };
+module.exports = { db, initDatabase, runQuery, getQuery, getOne, runTransaction, formatDateTime, nowFormatted, nowPlusHours, parseUTCDate };
